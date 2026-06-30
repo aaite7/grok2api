@@ -1,23 +1,23 @@
 {
   "functions": {
-    "app/main.py": {
+    "api/index.py": {
       "maxDuration": 60
     }
   },
   "builds": [
     {
-      "src": "app/main.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/static/(.*)",
-      "dest": "app/main.py"
+      "dest": "api/index.py"
     },
     {
       "src": "/(.*)",
-      "dest": "app/main.py"
+      "dest": "api/index.py"
     }
   ]
 }
