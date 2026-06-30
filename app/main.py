@@ -96,11 +96,16 @@ def _release_scheduler_lock() -> None:
 # Early logging setup (before config is loaded)
 # ---------------------------------------------------------------------------
 
-setup_logging(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    file_logging=os.getenv("LOG_FILE_ENABLED", "true").strip().lower()
-    in {"1", "true", "yes", "on"},
-)
+try:
+    setup_logging(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        file_logging=os.getenv("LOG_FILE_ENABLED", "true").strip().lower()
+        in {"1", "true", "yes", "on"},
+    )
+except Exception:
+    import traceback
+    traceback.print_exc()
+    sys.stderr.write("WARNING: early logging setup failed, continuing anyway\n")
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +441,13 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+try:
+    app = create_app()
+except Exception:
+    import traceback
+    traceback.print_exc()
+    sys.stderr.write("FATAL: app creation failed\n")
+    raise
 
 
 if __name__ == "__main__":
