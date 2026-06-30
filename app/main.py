@@ -441,13 +441,7 @@ def create_app() -> FastAPI:
     return app
 
 
-try:
-    app = create_app()
-except Exception:
-    import traceback
-    traceback.print_exc()
-    sys.stderr.write("FATAL: app creation failed\n")
-    raise
+app = create_app()
 
 
 if __name__ == "__main__":
