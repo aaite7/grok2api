@@ -35,6 +35,14 @@ from app.platform.storage import reconcile_local_media_cache_async
 
 load_dotenv()
 
+# Detect Vercel serverless environment early — redirect writable paths to /tmp
+# and disable background services that cannot run in serverless.
+_IS_VERCEL = os.getenv("VERCEL") == "1"
+if _IS_VERCEL:
+    os.environ.setdefault("DATA_DIR", "/tmp/data")
+    os.environ.setdefault("LOG_DIR", "/tmp/logs")
+    os.environ.setdefault("LOG_FILE_ENABLED", "false")
+
 
 # ---------------------------------------------------------------------------
 # Scheduler leader-election via advisory file lock
@@ -48,9 +56,12 @@ def _try_acquire_scheduler_lock() -> bool:
     """Non-blocking attempt to become the scheduler leader.
 
     Returns True if this worker acquired the lock (i.e. is the leader).
+    Returns False in Vercel serverless (no concurrent-worker concept).
     Falls back to True on Windows where fcntl is unavailable.
     """
     global _lock_fd
+    if _IS_VERCEL:
+        return False
     try:
         import fcntl
 
@@ -156,35 +167,34 @@ async def lifespan(app: FastAPI):
     # 3. Account directory sync loop — all workers, lightweight incremental pull.
     #    Keeps each worker's in-memory table eventually consistent with the repo.
     #
-    #    Adaptive interval strategy:
-    #      - After detecting changes  → re-check in ACCOUNT_SYNC_ACTIVE_INTERVAL (default 3 s)
-    #        so rapid back-to-back writes (bulk import, refresh cycle) are picked up quickly.
-    #      - After N idle polls       → back off toward ACCOUNT_SYNC_INTERVAL (default 30 s).
-    #    scan_changes() is an indexed DB query that costs < 1 ms when nothing changed,
-    #    so polling aggressively after a change is essentially free.
+    #    Skipped in Vercel serverless: long-running background tasks are not
+    #    supported because the runtime freezes the process between requests.
     _SYNC_IDLE_INTERVAL = int(os.getenv("ACCOUNT_SYNC_INTERVAL", "30"))
     _SYNC_ACTIVE_INTERVAL = int(os.getenv("ACCOUNT_SYNC_ACTIVE_INTERVAL", "3"))
     _SYNC_IDLE_AFTER = 5  # consecutive empty polls before returning to idle pace
 
-    async def _sync_loop() -> None:
-        idle_streak = 0
-        while True:
-            interval = (
-                _SYNC_ACTIVE_INTERVAL
-                if idle_streak < _SYNC_IDLE_AFTER
-                else _SYNC_IDLE_INTERVAL
-            )
-            await asyncio.sleep(interval)
-            try:
-                changed = await directory.sync_if_changed()
-                idle_streak = 0 if changed else min(idle_streak + 1, _SYNC_IDLE_AFTER)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.debug("account directory sync error: error={}", exc)
-                idle_streak = _SYNC_IDLE_AFTER  # back off on errors
+    if not _IS_VERCEL:
+        async def _sync_loop() -> None:
+            idle_streak = 0
+            while True:
+                interval = (
+                    _SYNC_ACTIVE_INTERVAL
+                    if idle_streak < _SYNC_IDLE_AFTER
+                    else _SYNC_IDLE_INTERVAL
+                )
+                await asyncio.sleep(interval)
+                try:
+                    changed = await directory.sync_if_changed()
+                    idle_streak = 0 if changed else min(idle_streak + 1, _SYNC_IDLE_AFTER)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("account directory sync error: error={}", exc)
+                    idle_streak = _SYNC_IDLE_AFTER  # back off on errors
 
-    sync_task = asyncio.create_task(_sync_loop(), name="account-dir-sync")
+        sync_task = asyncio.create_task(_sync_loop(), name="account-dir-sync")
+    else:
+        sync_task = None
 
     # 4. Account refresh scheduler — only the leader worker.
     #    Uses an advisory file lock so exactly one process runs the heavy
@@ -250,11 +260,12 @@ async def lifespan(app: FastAPI):
     # Shutdown
     # -----------
     logger.info("application shutdown started")
-    sync_task.cancel()
-    try:
-        await sync_task
-    except asyncio.CancelledError:
-        pass
+    if sync_task is not None:
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            pass
 
     if is_leader:
         scheduler.stop()
