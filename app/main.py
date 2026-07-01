@@ -18,6 +18,8 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+sys.stderr.write("[grok2api] module-level imports starting\n"); sys.stderr.flush()
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,12 +27,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+sys.stderr.write("[grok2api] importing app.platform.* modules\n"); sys.stderr.flush()
+
 from app.platform.logging.logger import logger, setup_logging, reload_logging
 from app.platform.config.snapshot import config as _config
 from app.platform.errors import AppError
 from app.platform.meta import get_project_version
 from app.platform.paths import data_path
 from app.platform.storage import reconcile_local_media_cache_async
+
+sys.stderr.write("[grok2api] platform imports done\n"); sys.stderr.flush()
 
 
 load_dotenv()
@@ -105,9 +111,12 @@ try:
 except Exception:
     import traceback
     traceback.print_exc()
-    sys.stderr.write("WARNING: early logging setup failed, continuing anyway\n")
+
+sys.stderr.write("[grok2api] logging setup done\n"); sys.stderr.flush()
 
 
+# ---------------------------------------------------------------------------
+# Lifespan
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -120,6 +129,7 @@ async def lifespan(app: FastAPI):
     repo = None
 
     try:
+        sys.stderr.write("[grok2api] lifespan starting\n"); sys.stderr.flush()
         # 1. Load configuration.
         await _config.load()
         reload_logging(
@@ -254,9 +264,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         import traceback
         traceback.print_exc()
-        sys.stderr.write("FATAL: lifespan startup failed\n")
+        sys.stderr.write("FATAL: lifespan startup failed\n"); sys.stderr.flush()
         logger.exception("application startup failed")
 
+    sys.stderr.write("[grok2api] lifespan ready, yielding\n"); sys.stderr.flush()
     yield
 
     # -----------
@@ -440,7 +451,11 @@ def create_app() -> FastAPI:
     return app
 
 
+sys.stderr.write("[grok2api] creating FastAPI app\n"); sys.stderr.flush()
+
 app = create_app()
+
+sys.stderr.write("[grok2api] app created, routes={}\n".format(len(app.routes))); sys.stderr.flush()
 
 
 if __name__ == "__main__":
