@@ -167,29 +167,42 @@ async def lifespan(app: FastAPI):
         repo = create_repository()
         await repo.initialize()
 
-        # 2a. First-boot migrations (config seed / account migration from SQLite).
-        from app.platform.startup import run_startup_migrations
+        if _IS_VERCEL:
+            # -----------------------------------------------------------------
+            # Vercel fast path — skip migrations, sync loops, and schedulers.
+            # Account data is expected to be pre-populated before deployment.
+            # -----------------------------------------------------------------
+            directory = await get_account_directory(repo)
+            app.state.repository = repo
+            app.state.directory = directory
+            is_leader = False
+            logger.info("vercel: fast-start skipped migration / sync / scheduler")
+        else:
+            # -----------------------------------------------------------------
+            # Full startup — Docker / local development.
+            # -----------------------------------------------------------------
+            # 2a. First-boot migrations (config seed / account migration from SQLite).
+            from app.platform.startup import run_startup_migrations
 
-        await run_startup_migrations(
-            config_backend=_config._get_backend(),
-            account_repo=repo,
-        )
-        # Reload config in case it was just seeded/migrated into the backend.
-        await _config.load()
-        await reconcile_local_media_cache_async()
+            await run_startup_migrations(
+                config_backend=_config._get_backend(),
+                account_repo=repo,
+            )
+            # Reload config in case it was just seeded/migrated into the backend.
+            await _config.load()
+            await reconcile_local_media_cache_async()
 
-        directory = await get_account_directory(repo)
+            directory = await get_account_directory(repo)
 
-        # Expose repository on app.state for admin handlers.
-        app.state.repository = repo
-        app.state.directory = directory
+            # Expose repository on app.state for admin handlers.
+            app.state.repository = repo
+            app.state.directory = directory
 
-        # 3. Account directory sync loop — all workers, lightweight incremental pull.
-        _SYNC_IDLE_INTERVAL = int(os.getenv("ACCOUNT_SYNC_INTERVAL", "30"))
-        _SYNC_ACTIVE_INTERVAL = int(os.getenv("ACCOUNT_SYNC_ACTIVE_INTERVAL", "3"))
-        _SYNC_IDLE_AFTER = 5
+            # 3. Account directory sync loop — all workers, lightweight incremental pull.
+            _SYNC_IDLE_INTERVAL = int(os.getenv("ACCOUNT_SYNC_INTERVAL", "30"))
+            _SYNC_ACTIVE_INTERVAL = int(os.getenv("ACCOUNT_SYNC_ACTIVE_INTERVAL", "3"))
+            _SYNC_IDLE_AFTER = 5
 
-        if not _IS_VERCEL:
             async def _sync_loop() -> None:
                 idle_streak = 0
                 while True:
@@ -210,55 +223,55 @@ async def lifespan(app: FastAPI):
 
             sync_task = asyncio.create_task(_sync_loop(), name="account-dir-sync")
 
-        # 4. Account refresh scheduler — only the leader worker.
-        from app.control.account.refresh import AccountRefreshService
+            # 4. Account refresh scheduler — only the leader worker.
+            from app.control.account.refresh import AccountRefreshService
 
-        refresh_enabled = _config.get_bool("account.refresh.enabled", False)
+            refresh_enabled = _config.get_bool("account.refresh.enabled", False)
 
-        refresh_svc = AccountRefreshService(repo)
-        set_refresh_service(refresh_svc)
-        app.state.refresh_service = refresh_svc
+            refresh_svc = AccountRefreshService(repo)
+            set_refresh_service(refresh_svc)
+            app.state.refresh_service = refresh_svc
 
-        is_leader = _try_acquire_scheduler_lock()
-        scheduler = get_account_refresh_scheduler(refresh_svc)
-        set_refresh_scheduler(scheduler)
-        set_refresh_scheduler_leader(is_leader)
-        app.state.account_refresh_scheduler = scheduler
-        app.state.account_refresh_is_leader = is_leader
+            is_leader = _try_acquire_scheduler_lock()
+            scheduler = get_account_refresh_scheduler(refresh_svc)
+            set_refresh_scheduler(scheduler)
+            set_refresh_scheduler_leader(is_leader)
+            app.state.account_refresh_scheduler = scheduler
+            app.state.account_refresh_is_leader = is_leader
 
-        strategy_name = reconcile_refresh_runtime(refresh_enabled)
-        if is_leader and strategy_name == "quota":
-            logger.info(
-                "scheduler leader: pid={} strategy=quota active_sync_s={} idle_sync_s={}",
-                os.getpid(),
-                _SYNC_ACTIVE_INTERVAL,
-                _SYNC_IDLE_INTERVAL,
-            )
-        elif is_leader:
-            logger.info(
-                "scheduler leader: pid={} strategy=random (scheduler idle) "
-                "active_sync_s={} idle_sync_s={}",
-                os.getpid(),
-                _SYNC_ACTIVE_INTERVAL,
-                _SYNC_IDLE_INTERVAL,
-            )
-        else:
-            logger.info(
-                "scheduler follower: pid={} strategy={} active_sync_s={} idle_sync_s={}",
-                os.getpid(),
-                strategy_name,
-                _SYNC_ACTIVE_INTERVAL,
-                _SYNC_IDLE_INTERVAL,
-            )
+            strategy_name = reconcile_refresh_runtime(refresh_enabled)
+            if is_leader and strategy_name == "quota":
+                logger.info(
+                    "scheduler leader: pid={} strategy=quota active_sync_s={} idle_sync_s={}",
+                    os.getpid(),
+                    _SYNC_ACTIVE_INTERVAL,
+                    _SYNC_IDLE_INTERVAL,
+                )
+            elif is_leader:
+                logger.info(
+                    "scheduler leader: pid={} strategy=random (scheduler idle) "
+                    "active_sync_s={} idle_sync_s={}",
+                    os.getpid(),
+                    _SYNC_ACTIVE_INTERVAL,
+                    _SYNC_IDLE_INTERVAL,
+                )
+            else:
+                logger.info(
+                    "scheduler follower: pid={} strategy={} active_sync_s={} idle_sync_s={}",
+                    os.getpid(),
+                    strategy_name,
+                    _SYNC_ACTIVE_INTERVAL,
+                    _SYNC_IDLE_INTERVAL,
+                )
 
-        # 5. Initialise proxy directory and start clearance refresh scheduler.
-        from app.control.proxy import get_proxy_directory
-        from app.control.proxy.scheduler import ProxyClearanceScheduler
+            # 5. Initialise proxy directory and start clearance refresh scheduler.
+            from app.control.proxy import get_proxy_directory
+            from app.control.proxy.scheduler import ProxyClearanceScheduler
 
-        proxy_dir = await get_proxy_directory()
-        proxy_scheduler = ProxyClearanceScheduler(proxy_dir)
-        if is_leader:
-            proxy_scheduler.start()
+            proxy_dir = await get_proxy_directory()
+            proxy_scheduler = ProxyClearanceScheduler(proxy_dir)
+            if is_leader:
+                proxy_scheduler.start()
 
         logger.info("application startup completed")
     except Exception:
