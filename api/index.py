@@ -1,8 +1,15 @@
 """Vercel Serverless entry point — minimal startup, no background tasks."""
 
+import asyncio
 import os
 import sys
 import traceback
+
+# --- Ensure project root is on PYTHONPATH so 'app' package is importable ---
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 # --- Vercel environment defaults (must run before any application imports) ---
 
@@ -55,7 +62,7 @@ async def vercel_lifespan(app: FastAPI):
         logger.info("account storage: backend={} target={}", storage_backend, storage_target)
 
         repo = create_repository()
-        await repo.initialize()
+        await asyncio.wait_for(repo.initialize(), timeout=15)
         app.state.repository = repo
 
         await config.load()
